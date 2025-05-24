@@ -3,7 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import { toast } from 'sonner';
 import { TransactionBlock } from '@mysten/sui.js/transactions';
-import { useWallets, useSignAndExecuteTransaction } from '@mysten/dapp-kit';
+import { useWallet } from '../hook/useWallet';
 import axios from 'axios';
 // Импорты SVG генераторов (пример)
 import { giftCard_Pink } from './svg/giftCard_Pink.js';
@@ -19,8 +19,10 @@ const cardDesigns = [
   { name: 'Green', generator: giftCard_Green },
 ];
 
-function isValidSuiAddress(address: string) {
-  return /^0x[a-fA-F0-9]{40}$/.test(address);
+function isValidSuiAddress(address: any) {
+  if (typeof address !== 'string') return false;
+  // Убираем строгую проверку длины, так как адреса могут быть разной длины
+  return /^0x[a-fA-F0-9]+$/.test(address) && address.length >= 3;
 }
 
 async function getCoinsViaFetch(address: string, coinType: string) {
@@ -39,9 +41,9 @@ async function getCoinsViaFetch(address: string, coinType: string) {
 }
 
 export default function GiftCardForm() {
-  const wallets = useWallets();
-  const signAndExecuteTransaction = useSignAndExecuteTransaction();
-  const currentWallet = wallets.length > 0 ? wallets[0] : null;
+  // Используем наш кастомный хук
+  const { userAccount, signAndExecuteTransaction, isConnected, isLoading } = useWallet();
+
   const [activeTab, setActiveTab] = useState<'create' | 'redeem'>('create');
   const [recipient, setRecipient] = useState('');
   const [amount, setAmount] = useState('');
@@ -124,28 +126,34 @@ export default function GiftCardForm() {
   }
 
   async function createGiftCard() {
-    if (!currentWallet) {
-      toast.error('Connect your wallet first');
+    console.log('createGiftCard called');
+    console.log('User account:', userAccount);
+    console.log('Recipient:', recipient, 'Type:', typeof recipient);
+    
+    // Проверяем подключение кошелька
+    if (!userAccount?.address) {
+      toast.error('Подключите кошелек');
       return;
     }
 
-    const userAddress = currentWallet.accounts?.[0]?.address;
-    if (!userAddress) {
-      toast.error('Wallet address not available');
-      return;
-    }
-
+    // Проверяем входные данные
     if (!amount || !recipient) {
-      toast.error('Please enter amount and recipient');
+      toast.error('Введите сумму и адрес получателя');
       return;
     }
 
-    if (typeof recipient !== 'string' || !isValidSuiAddress(recipient)) {
-      toast.error('Recipient address not valid');
+    // Очищаем адрес получателя от лишних пробелов
+    const cleanRecipient = recipient.trim();
+    
+    if (!isValidSuiAddress(cleanRecipient)) {
+      toast.error('Неверный адрес получателя. Адрес должен начинаться с 0x');
+      console.log('Invalid recipient address:', cleanRecipient);
       return;
     }
 
     try {
+      toast.loading('Создание подарочной карты...');
+      
       const metadataUrl = await uploadSVGAndMetadataToPinata({
         amount: Number(amount),
         serviceName: 'Sendly Gift',
@@ -156,49 +164,72 @@ export default function GiftCardForm() {
         USDT: '0x...USDT_PACKAGE_ID::usdt::USDT',
         SUI: '0x2::sui::SUI',
       };
+      
       const coinType = coinTypeMap[tokenType];
-      const coinObjectId = await getUserCoinObjectId(userAddress, coinType);
+      const coinObjectId = await getUserCoinObjectId(userAccount.address, coinType);
+      
       if (!coinObjectId) {
-        toast.error(`No ${tokenType} coin found in your wallet`);
+        toast.error(`В вашем кошельке не найдено монет ${tokenType}`);
         return;
       }
 
       const collectionObjectId = '0x...'; // Вставьте сюда ваш ID коллекции
 
       const tx = new TransactionBlock();
-
       const amountInt = Math.floor(Number(amount) * 100);
 
       tx.moveCall({
         target: '0x3ff96881372987062677120bdd2460561ae2f2ba90fa8a0aeb397144508e65c9::gift_card::create_gift_card_usdc',
         arguments: [
           tx.object(collectionObjectId),
-          tx.pure(recipient, 'address'),
+          tx.pure(cleanRecipient, 'address'),
           tx.object(coinObjectId),
           tx.pure(new TextEncoder().encode(metadataUrl), 'vector<u8>'),
           tx.pure(new TextEncoder().encode(message), 'vector<u8>'),
         ],
       });
 
-      const result = await signAndExecuteTransaction({
-        transactionBlock: tx,
-      });
+      const result = await signAndExecuteTransaction(tx);
 
-      toast.success('Gift card created! Tx digest: ' + result.digest);
+      toast.success('Подарочная карта создана! Tx digest: ' + result.digest);
+      
+      // Очищаем форму
+      setRecipient('');
+      setAmount('');
+      setMessage('');
+      
     } catch (e: any) {
-      toast.error('Failed to create gift card: ' + e.message);
+      console.error('Error creating gift card:', e);
+      toast.error('Ошибка создания подарочной карты: ' + e.message);
     }
   }
 
-  if (!currentWallet) {
+  // Если кошелек загружается, показываем загрузку
+  if (isLoading) {
     return (
-      <button onClick={() => {
-        // Здесь вызовите метод подключения кошелька, например walletSelector.open()
-        // В зависимости от вашей реализации
-        alert('Please connect your wallet');
-      }}>
-        Connect Wallet
-      </button>
+      <main className="pt-28 max-w-xl mx-auto bg-white rounded-3xl shadow-2xl p-8">
+        <div className="text-center">
+          <h2 className="text-2xl font-bold text-indigo-700 mb-4">
+            Загрузка...
+          </h2>
+        </div>
+      </main>
+    );
+  }
+
+  // Если кошелек не подключен, показываем сообщение
+  if (!isConnected) {
+    return (
+      <main className="pt-28 max-w-xl mx-auto bg-white rounded-3xl shadow-2xl p-8">
+        <div className="text-center">
+          <h2 className="text-2xl font-bold text-indigo-700 mb-4">
+            Подключите кошелек
+          </h2>
+          <p className="text-gray-600">
+            Для создания подарочных карт необходимо подключить кошелек через кнопку в шапке сайта.
+          </p>
+        </div>
+      </main>
     );
   }
 
@@ -211,7 +242,7 @@ export default function GiftCardForm() {
           }`}
           onClick={() => setActiveTab('create')}
         >
-          Create Gift Card
+          Создать карту
         </button>
         <button
           className={`px-6 py-3 rounded-t-2xl font-bold text-lg transition ${
@@ -219,7 +250,7 @@ export default function GiftCardForm() {
           }`}
           onClick={() => setActiveTab('redeem')}
         >
-          Redeem Gift Card
+          Использовать карту
         </button>
       </div>
 
@@ -227,7 +258,7 @@ export default function GiftCardForm() {
         <>
           {/* Выбор дизайна */}
           <div className="mb-4">
-            <label className="block font-semibold mb-2 text-indigo-700">Card design:</label>
+            <label className="block font-semibold mb-2 text-indigo-700">Дизайн карты:</label>
             <div className="flex gap-4">
               {cardDesigns.map((design) => (
                 <button
@@ -287,33 +318,39 @@ export default function GiftCardForm() {
             </div>
           )}
 
-          {/* Остальные поля */}
+          {/* Поля формы */}
           <input
             type="text"
-            placeholder="Recipient address (0x...)"
+            placeholder="Адрес получателя (0x...)"
             value={recipient}
-            onChange={(e) => setRecipient(e.target.value)}
+            onChange={(e) => {
+              console.log('Recipient input changed:', e.target.value);
+              setRecipient(e.target.value);
+            }}
             className="w-full px-4 py-3 rounded-xl border border-indigo-200 text-lg focus:outline-none focus:ring-2 focus:ring-indigo-400 mb-4"
           />
           <input
             type="number"
-            placeholder="Amount (for example, 10)"
+            placeholder="Сумма (например, 10)"
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
             className="w-full px-4 py-3 rounded-xl border border-indigo-200 text-lg focus:outline-none focus:ring-2 focus:ring-indigo-400 mb-4"
           />
           <input
             type="text"
-            placeholder="Message (for example, Happy Birthday!)"
+            placeholder="Сообщение (например, С Днем Рождения!)"
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             className="w-full px-4 py-3 rounded-xl border border-indigo-200 text-lg focus:outline-none focus:ring-2 focus:ring-indigo-400 mb-4"
           />
           <button
-            onClick={createGiftCard}
+            onClick={() => {
+              console.log('Create Card button clicked');
+              createGiftCard();
+            }}
             className="w-full py-3 bg-gradient-to-r from-indigo-500 to-indigo-400 text-white rounded-xl font-bold text-lg shadow hover:from-indigo-600 hover:to-indigo-500 transition"
           >
-            Create Card
+            Создать карту
           </button>
         </>
       )}
@@ -322,18 +359,18 @@ export default function GiftCardForm() {
         <div>
           <input
             type="text"
-            placeholder="Token ID"
+            placeholder="ID токена"
             value={tokenId}
             onChange={(e) => setTokenId(e.target.value)}
             className="w-full px-4 py-3 rounded-xl border border-indigo-200 text-lg focus:outline-none focus:ring-2 focus:ring-indigo-400 mb-4"
           />
           <button
             onClick={() => {
-              toast('Redeem functionality not implemented yet');
+              toast('Функция использования карты пока не реализована');
             }}
             className="w-full py-3 bg-gradient-to-r from-green-500 to-green-400 text-white rounded-xl font-bold text-lg shadow hover:from-green-600 hover:to-green-500 transition"
           >
-            Redeem Card
+            Использовать карту
           </button>
         </div>
       )}
