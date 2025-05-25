@@ -43,7 +43,6 @@ async function getCoinsViaFetch(address: string, coinType: string) {
 export default function GiftCardForm() {
   // Используем наш кастомный хук
   const { userAccount, signAndExecuteTransaction, isConnected, isLoading } = useWallet();
-
   const [activeTab, setActiveTab] = useState<'create' | 'redeem'>('create');
   const [recipient, setRecipient] = useState('');
   const [amount, setAmount] = useState('');
@@ -117,12 +116,26 @@ export default function GiftCardForm() {
     }
   }
 
-  async function getUserCoinObjectId(address: string, coinType: string): Promise<string | null> {
+  // Исправленная функция для получения подходящей монеты
+  async function getSuitableCoinObjectId(address: string, coinType: string, requiredAmount: number): Promise<string | null> {
     const coins = await getCoinsViaFetch(address, coinType);
     if (!coins || coins.length === 0) {
       return null;
     }
-    return coins[0].coinObjectId;
+    
+    // Сортируем монеты по балансу в убывающем порядке
+    coins.sort((a: any, b: any) => parseInt(b.balance) - parseInt(a.balance));
+    
+    // Ищем монету с достаточным балансом
+    for (const coin of coins) {
+      if (parseInt(coin.balance) >= requiredAmount) {
+        console.log(`Found suitable coin: ${coin.coinObjectId} with balance ${coin.balance} (required: ${requiredAmount})`);
+        return coin.coinObjectId;
+      }
+    }
+    
+    console.log(`No coin found with sufficient balance. Required: ${requiredAmount}, available coins:`, coins.map((c: any) => ({ id: c.coinObjectId, balance: c.balance })));
+    return null;
   }
 
   async function createGiftCard() {
@@ -135,13 +148,13 @@ export default function GiftCardForm() {
       toast.error('Подключите кошелек');
       return;
     }
-
+  
     // Проверяем входные данные
     if (!amount || !recipient) {
       toast.error('Введите сумму и адрес получателя');
       return;
     }
-
+  
     // Очищаем адрес получателя от лишних пробелов
     const cleanRecipient = recipient.trim();
     
@@ -150,7 +163,7 @@ export default function GiftCardForm() {
       console.log('Invalid recipient address:', cleanRecipient);
       return;
     }
-
+  
     try {
       toast.loading('Создание подарочной карты...');
       
@@ -158,39 +171,68 @@ export default function GiftCardForm() {
         amount: Number(amount),
         serviceName: 'Sendly Gift',
       });
-
+  
+      // Адреса токенов ДОЛЖНЫ совпадать с теми, что в контракте
       const coinTypeMap = {
         USDC: '0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC',
-        USDT: '0x...USDT_PACKAGE_ID::usdt::USDT',
+        USDT: '0x375f70cf2ae4c00bf37117d0c85a2c71545e6ee05c4a5c7d282cd66a4504b068::usdt::USDT',
         SUI: '0x2::sui::SUI',
       };
       
+      console.log('Token type selected:', tokenType);
+      
       const coinType = coinTypeMap[tokenType];
-      const coinObjectId = await getUserCoinObjectId(userAccount.address, coinType);
+      console.log('Getting coins for:', userAccount.address, 'coinType:', coinType);
+      
+      // Конвертируем сумму в правильные единицы (для USDC/USDT обычно 6 decimals, для SUI - 9)
+      const decimals = tokenType === 'SUI' ? 9 : 6;
+      const amountInMinorUnits = Math.floor(Number(amount) * Math.pow(10, decimals));
+      
+      const coinObjectId = await getSuitableCoinObjectId(userAccount.address, coinType, amountInMinorUnits);
+      console.log('Found coin object ID:', coinObjectId, 'Required amount:', amountInMinorUnits);
       
       if (!coinObjectId) {
-        toast.error(`В вашем кошельке не найдено монет ${tokenType}`);
+        toast.error(`В вашем кошельке не найдено достаточно монет ${tokenType}. Требуется: ${amount} ${tokenType}`);
         return;
       }
-
-      const collectionObjectId = '0x...'; // Вставьте сюда ваш ID коллекции
-
+  
+      const PACKAGE_ID = '0xf193e36bc2c9b3f895a938aa4c647e6ef879fc406794e8d80e40f9c504b72c22';
+      const COLLECTION_OBJECT_ID = '0xeb9cdcac204ae57cba24ca39935697b9ac0e352d2de1cb454b5caafdba916327';
+      
       const tx = new TransactionBlock();
-      const amountInt = Math.floor(Number(amount) * 100);
+      
+      console.log('Transaction parameters:', {
+        packageId: PACKAGE_ID,
+        collectionObjectId: COLLECTION_OBJECT_ID,
+        recipient: cleanRecipient,
+        coinObjectId: coinObjectId,
+        metadataUrl: metadataUrl,
+        message: message
+      });
+  
+      const functionTarget = `${PACKAGE_ID}::gift_card::create_gift_card_${tokenType.toLowerCase()}`;
+      console.log('Function target:', functionTarget);
 
+      // Если нужна определенная сумма, а не вся монета, разделяем монету
+      const [splitCoin] = tx.splitCoins(tx.object(coinObjectId), [tx.pure(amountInMinorUnits)]);
+  
+      // Правильный порядок аргументов согласно сигнатуре функции:
+      // collection, recipient, coin, metadata_uri, message
       tx.moveCall({
-        target: '0x3ff96881372987062677120bdd2460561ae2f2ba90fa8a0aeb397144508e65c9::gift_card::create_gift_card_usdc',
+        target: functionTarget,
         arguments: [
-          tx.object(collectionObjectId),
-          tx.pure(cleanRecipient, 'address'),
-          tx.object(coinObjectId),
-          tx.pure(new TextEncoder().encode(metadataUrl), 'vector<u8>'),
-          tx.pure(new TextEncoder().encode(message), 'vector<u8>'),
+          tx.object(COLLECTION_OBJECT_ID),                                    // collection
+          tx.pure(cleanRecipient, 'address'),                                 // recipient  
+          splitCoin,                                                          // coin (используем разделенную монету)
+          tx.pure(new TextEncoder().encode(metadataUrl), 'vector<u8>'),      // metadata_uri
+          tx.pure(new TextEncoder().encode(message), 'vector<u8>'),          // message
         ],
       });
-
+  
+      console.log('Executing transaction...');
       const result = await signAndExecuteTransaction(tx);
-
+      console.log('Transaction result:', result);
+  
       toast.success('Подарочная карта создана! Tx digest: ' + result.digest);
       
       // Очищаем форму
