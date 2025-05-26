@@ -37,7 +37,15 @@ async function getCoinsViaFetch(address: string, coinType: string) {
     }),
   });
   const data = await response.json();
-  return data.result?.data || [];
+  console.log('RPC response for suix_getCoins:', JSON.stringify(data, null, 2));
+  if (!data.result?.data) {
+    console.log('No coins found for address:', address, 'coinType:', coinType);
+    return [];
+  }
+  // Фильтруем монеты, чтобы убедиться, что coinType совпадает
+  const coins = data.result.data.filter((coin: any) => coin.coinType === coinType);
+  console.log('Filtered coins:', coins);
+  return coins;
 }
 
 export default function GiftCardForm() {
@@ -117,24 +125,55 @@ export default function GiftCardForm() {
   }
 
   // Исправленная функция для получения подходящей монеты
-  async function getSuitableCoinObjectId(address: string, coinType: string, requiredAmount: number): Promise<string | null> {
+  async function getSuitableCoinObjectId(address: string, coinType: string, requiredAmount: number): Promise<string[] | null> {
     const coins = await getCoinsViaFetch(address, coinType);
+    console.log('Fetched coins for address', address, 'coinType', coinType, ':', coins);
     if (!coins || coins.length === 0) {
+      console.log('No coins found for coinType:', coinType);
       return null;
     }
-    
-    // Сортируем монеты по балансу в убывающем порядке
-    coins.sort((a: any, b: any) => parseInt(b.balance) - parseInt(a.balance));
-    
-    // Ищем монету с достаточным балансом
-    for (const coin of coins) {
+  
+    // Фильтруем монеты с правильным типом
+    const validCoins = coins.filter((coin: any) => coin.coinType === coinType);
+    if (validCoins.length === 0) {
+      console.log('No valid coins found for coinType:', coinType);
+      return null;
+    }
+  
+    // Проверяем суммарный баланс
+    const totalBalance = validCoins.reduce((sum: number, coin: any) => sum + parseInt(coin.balance), 0);
+    console.log('Total USDC balance:', totalBalance, 'Required:', requiredAmount);
+  
+    if (totalBalance < requiredAmount) {
+      console.log('Insufficient total balance. Required:', requiredAmount, 'Available:', totalBalance);
+      return null;
+    }
+  
+    // Сортируем по убыванию баланса
+    validCoins.sort((a: any, b: any) => parseInt(b.balance) - parseInt(a.balance));
+  
+    // Проверяем, есть ли одна монета с достаточным балансом
+    for (const coin of validCoins) {
       if (parseInt(coin.balance) >= requiredAmount) {
-        console.log(`Found suitable coin: ${coin.coinObjectId} with balance ${coin.balance} (required: ${requiredAmount})`);
-        return coin.coinObjectId;
+        console.log(`Found suitable coin: ${coin.coinObjectId} with balance ${coin.balance}`);
+        return [coin.coinObjectId]; // Возвращаем массив с одним ID
       }
     }
-    
-    console.log(`No coin found with sufficient balance. Required: ${requiredAmount}, available coins:`, coins.map((c: any) => ({ id: c.coinObjectId, balance: c.balance })));
+  
+    // Если одной монеты недостаточно, собираем список монет
+    let accumulatedBalance = 0;
+    const selectedCoinIds: string[] = [];
+    for (const coin of validCoins) {
+      accumulatedBalance += parseInt(coin.balance);
+      selectedCoinIds.push(coin.coinObjectId);
+      console.log(`Adding coin ${coin.coinObjectId} with balance ${coin.balance}. Accumulated: ${accumulatedBalance}`);
+      if (accumulatedBalance >= requiredAmount) {
+        console.log('Selected coins:', selectedCoinIds);
+        return selectedCoinIds;
+      }
+    }
+  
+    console.log('No combination of coins found with sufficient balance');
     return null;
   }
 
@@ -142,22 +181,19 @@ export default function GiftCardForm() {
     console.log('createGiftCard called');
     console.log('User account:', userAccount);
     console.log('Recipient:', recipient, 'Type:', typeof recipient);
-    
-    // Проверяем подключение кошелька
+  
     if (!userAccount?.address) {
       toast.error('Подключите кошелек');
       return;
     }
   
-    // Проверяем входные данные
     if (!amount || !recipient) {
       toast.error('Введите сумму и адрес получателя');
       return;
     }
   
-    // Очищаем адрес получателя от лишних пробелов
     const cleanRecipient = recipient.trim();
-    
+  
     if (!isValidSuiAddress(cleanRecipient)) {
       toast.error('Неверный адрес получателя. Адрес должен начинаться с 0x');
       console.log('Invalid recipient address:', cleanRecipient);
@@ -166,80 +202,62 @@ export default function GiftCardForm() {
   
     try {
       toast.loading('Создание подарочной карты...');
-      
-      const metadataUrl = await uploadSVGAndMetadataToPinata({
-        amount: Number(amount),
-        serviceName: 'Sendly Gift',
-      });
   
-      // Адреса токенов ДОЛЖНЫ совпадать с теми, что в контракте
-      const coinTypeMap = {
-        USDC: '0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC',
-        USDT: '0x375f70cf2ae4c00bf37117d0c85a2c71545e6ee05c4a5c7d282cd66a4504b068::usdt::USDT',
-        SUI: '0x2::sui::SUI',
-      };
-      
-      console.log('Token type selected:', tokenType);
-      
-      const coinType = coinTypeMap[tokenType];
-      console.log('Getting coins for:', userAccount.address, 'coinType:', coinType);
-      
-      // Конвертируем сумму в правильные единицы (для USDC/USDT обычно 6 decimals, для SUI - 9)
-      const decimals = tokenType === 'SUI' ? 9 : 6;
+      const metadataUrl = await uploadSVGAndMetadataToPinata(
+        { amount: Number(amount), serviceName: 'Sendly Gift' },
+        selectedDesign
+      );
+  
+      const coinType = '0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC';
+      const decimals = 6;
       const amountInMinorUnits = Math.floor(Number(amount) * Math.pow(10, decimals));
-      
-      const coinObjectId = await getSuitableCoinObjectId(userAccount.address, coinType, amountInMinorUnits);
-      console.log('Found coin object ID:', coinObjectId, 'Required amount:', amountInMinorUnits);
-      
-      if (!coinObjectId) {
-        toast.error(`В вашем кошельке не найдено достаточно монет ${tokenType}. Требуется: ${amount} ${tokenType}`);
+  
+      const coinObjectIds = await getSuitableCoinObjectId(userAccount.address, coinType, amountInMinorUnits);
+      console.log('Found coin object IDs:', coinObjectIds, 'Required amount:', amountInMinorUnits);
+  
+      if (!coinObjectIds || coinObjectIds.length === 0) {
+        toast.error(`В вашем кошельке не найдено достаточно монет USDC. Требуется: ${amount} USDC`);
         return;
       }
   
-      const PACKAGE_ID = '0xf193e36bc2c9b3f895a938aa4c647e6ef879fc406794e8d80e40f9c504b72c22';
-      const COLLECTION_OBJECT_ID = '0xeb9cdcac204ae57cba24ca39935697b9ac0e352d2de1cb454b5caafdba916327';
-      
+      const PACKAGE_ID = '0x99d953bfd9e91e1447548952dbd138f7fe0c442acec543ccad3d0da4c85771f5';
+      const COLLECTION_OBJECT_ID = '0x93d02b26c108f198d8d27af85d438e6a19ed2e0a7d0d9d3a7e577d8017406160';
+  
       const tx = new TransactionBlock();
-      
+  
       console.log('Transaction parameters:', {
         packageId: PACKAGE_ID,
         collectionObjectId: COLLECTION_OBJECT_ID,
         recipient: cleanRecipient,
-        coinObjectId: coinObjectId,
+        coinObjectIds: coinObjectIds,
         metadataUrl: metadataUrl,
         message: message
       });
   
-      const functionTarget = `${PACKAGE_ID}::gift_card::create_gift_card_${tokenType.toLowerCase()}`;
-      console.log('Function target:', functionTarget);
-
-      // Если нужна определенная сумма, а не вся монета, разделяем монету
-      const [splitCoin] = tx.splitCoins(tx.object(coinObjectId), [tx.pure(amountInMinorUnits)]);
+      const coinObject = tx.object(coinObjectIds[0]); // Используем только первую монету
   
-      // Правильный порядок аргументов согласно сигнатуре функции:
-      // collection, recipient, coin, metadata_uri, message
       tx.moveCall({
-        target: functionTarget,
+        target: `${PACKAGE_ID}::gift_card::create_gift_card`,
+        typeArguments: [coinType],
         arguments: [
-          tx.object(COLLECTION_OBJECT_ID),                                    // collection
-          tx.pure(cleanRecipient, 'address'),                                 // recipient  
-          splitCoin,                                                          // coin (используем разделенную монету)
-          tx.pure(new TextEncoder().encode(metadataUrl), 'vector<u8>'),      // metadata_uri
-          tx.pure(new TextEncoder().encode(message), 'vector<u8>'),          // message
+          tx.object(COLLECTION_OBJECT_ID),
+          tx.pure.address(cleanRecipient),
+          coinObject,
+          tx.pure(Array.from(new TextEncoder().encode(metadataUrl))),
+          tx.pure(Array.from(new TextEncoder().encode(message))),
         ],
       });
   
       console.log('Executing transaction...');
-      const result = await signAndExecuteTransaction(tx);
+      const result = await signAndExecuteTransaction(tx, { gasBudget: 300000000 });
       console.log('Transaction result:', result);
   
       toast.success('Подарочная карта создана! Tx digest: ' + result.digest);
-      
-      // Очищаем форму
+  
       setRecipient('');
       setAmount('');
       setMessage('');
-      
+  
     } catch (e: any) {
       console.error('Error creating gift card:', e);
       toast.error('Ошибка создания подарочной карты: ' + e.message);
@@ -274,7 +292,59 @@ export default function GiftCardForm() {
       </main>
     );
   }
-
+  async function redeemGiftCard() {
+    console.log('redeemGiftCard called');
+    console.log('User account:', userAccount);
+    console.log('Token ID:', tokenId);
+  
+    if (!userAccount?.address) {
+      toast.error('Подключите кошелек');
+      return;
+    }
+  
+    if (!tokenId) {
+      toast.error('Введите ID токена');
+      return;
+    }
+  
+    if (!isValidSuiAddress(tokenId)) {
+      toast.error('Неверный ID токена. ID должен начинаться с 0x');
+      console.log('Invalid token ID:', tokenId);
+      return;
+    }
+  
+    try {
+      toast.loading('Погашение подарочной карты...');
+  
+      const PACKAGE_ID = '0x99d953bfd9e91e1447548952dbd138f7fe0c442acec543ccad3d0da4c85771f5';
+      
+      const tx = new TransactionBlock();
+  
+      console.log('Transaction parameters:', {
+        packageId: PACKAGE_ID,
+        tokenId: tokenId
+      });
+  
+      tx.moveCall({
+        target: `${PACKAGE_ID}::gift_card::redeem_gift_card`,
+        arguments: [
+          tx.object(tokenId),
+        ],
+      });
+  
+      console.log('Executing transaction...');
+      const result = await signAndExecuteTransaction(tx, { gasBudget: 100000000 });
+      console.log('Transaction result:', result);
+  
+      toast.success('Подарочная карта погашена! Tx digest: ' + result.digest);
+  
+      setTokenId('');
+  
+    } catch (e: any) {
+      console.error('Error redeeming gift card:', e);
+      toast.error('Ошибка погашения подарочной карты: ' + e.message);
+    }
+  }
   return (
     <main className="pt-28 max-w-xl mx-auto bg-white rounded-3xl shadow-2xl p-8">
       <div className="flex justify-center mb-6 space-x-4">
