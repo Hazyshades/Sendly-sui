@@ -21,33 +21,10 @@ const cardDesigns = [
 
 function isValidSuiAddress(address: any) {
   if (typeof address !== 'string') return false;
-  // Улучшенная валидация адреса Sui
-  const cleanAddress = address.trim();
-  if (!cleanAddress.startsWith('0x')) return false;
-  
-  // Проверяем длину (должна быть 66 символов для полного адреса или меньше для сокращенного)
-  if (cleanAddress.length < 3 || cleanAddress.length > 66) return false;
-  
-  // Проверяем что после 0x только hex символы
-  const hexPart = cleanAddress.slice(2);
-  return /^[a-fA-F0-9]+$/.test(hexPart);
-}
-
-// Функция для нормализации адреса Sui
-function normalizeAddress(address: string): string {
-  const cleaned = address.trim().toLowerCase();
-  if (cleaned.startsWith('0x')) {
-    // Убираем 0x, добавляем нули до длины 64 символа, затем возвращаем 0x
-    const hex = cleaned.slice(2);
-    const padded = hex.padStart(64, '0');
-    return `0x${padded}`;
-  }
-  return address;
+  return /^0x[a-fA-F0-9]+$/.test(address) && address.length >= 3;
 }
 
 async function getCoinsViaFetch(address: string, coinType: string) {
-  const normalizedAddress = normalizeAddress(address);
-  
   const response = await fetch('https://sui-rpc.publicnode.com/', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -55,13 +32,13 @@ async function getCoinsViaFetch(address: string, coinType: string) {
       jsonrpc: '2.0',
       id: 1,
       method: 'suix_getCoins',
-      params: [normalizedAddress, coinType],
+      params: [address, coinType],
     }),
   });
   const data = await response.json();
   console.log('RPC response for suix_getCoins:', JSON.stringify(data, null, 2));
   if (!data.result?.data) {
-    console.log('No coins found for address:', normalizedAddress, 'coinType:', coinType);
+    console.log('No coins found for address:', address, 'coinType:', coinType);
     return [];
   }
   const coins = data.result.data.filter((coin: any) => coin.coinType === coinType);
@@ -198,9 +175,8 @@ export default function GiftCardForm() {
   }
 
   // Функция для проверки существования объекта
-  async function checkObjectExists(objectId: string): Promise<{ exists: boolean; error?: string }> {
+  async function checkObjectExists(objectId: string): Promise<boolean> {
     try {
-      const normalizedId = normalizeAddress(objectId);
       const response = await fetch('https://sui-rpc.publicnode.com/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -208,23 +184,14 @@ export default function GiftCardForm() {
           jsonrpc: '2.0',
           id: 1,
           method: 'sui_getObject',
-          params: [normalizedId, { showContent: true }],
+          params: [objectId, { showContent: true }],
         }),
       });
       const data = await response.json();
-      
-      if (data.error) {
-        return { exists: false, error: data.error.message };
-      }
-      
-      if (data.result?.error) {
-        return { exists: false, error: data.result.error };
-      }
-      
-      return { exists: !!data.result && !data.result.error };
+      return data.result && !data.result.error;
     } catch (e) {
       console.error('Error checking object:', e);
-      return { exists: false, error: e.message };
+      return false;
     }
   }
 
@@ -276,9 +243,9 @@ export default function GiftCardForm() {
       
       toast.loading('Проверяем объекты коллекции...', { id: 'create-gift-card' });
       
-      const collectionCheck = await checkObjectExists(COLLECTION_OBJECT_ID);
-      if (!collectionCheck.exists) {
-        toast.error(`Объект коллекции не найден: ${collectionCheck.error || 'неизвестная ошибка'}`, {
+      const collectionExists = await checkObjectExists(COLLECTION_OBJECT_ID);
+      if (!collectionExists) {
+        toast.error('Объект коллекции не найден или недоступен. Возможно, контракт был изменен.', {
           id: 'create-gift-card'
         });
         return;
@@ -309,9 +276,9 @@ export default function GiftCardForm() {
       toast.loading('Проверяем монеты USDC...', { id: 'create-gift-card' });
       
       for (const coinId of coinObjectIds) {
-        const coinCheck = await checkObjectExists(coinId);
-        if (!coinCheck.exists) {
-          toast.error(`Монета ${coinId} не найдена: ${coinCheck.error || 'неизвестная ошибка'}`, {
+        const coinExists = await checkObjectExists(coinId);
+        if (!coinExists) {
+          toast.error(`Монета ${coinId} не найдена или недоступна. Попробуйте обновить страницу.`, {
             id: 'create-gift-card'
           });
           return;
@@ -319,18 +286,12 @@ export default function GiftCardForm() {
       }
   
       const tx = new TransactionBlock();
-      
-      // Нормализуем адреса
-      const normalizedSender = normalizeAddress(userAccount.address);
-      const normalizedRecipient = normalizeAddress(cleanRecipient);
-      
-      tx.setSender(normalizedSender);
+      tx.setSender(userAccount.address);
       
       console.log('Transaction parameters:', {
         packageId: PACKAGE_ID,
         collectionObjectId: COLLECTION_OBJECT_ID,
-        sender: normalizedSender,
-        recipient: normalizedRecipient,
+        recipient: cleanRecipient,
         coinObjectIds: coinObjectIds,
         metadataUrl: metadataUrl,
         message: message
@@ -339,7 +300,7 @@ export default function GiftCardForm() {
       // Если нужно объединить монеты
       let coinToUse;
       if (coinObjectIds.length > 1) {
-        const [firstCoin, ...restCoins] = coinObjectIds.map(id => normalizeAddress(id));
+        const [firstCoin, ...restCoins] = coinObjectIds;
         coinToUse = tx.object(firstCoin);
         
         // Объединяем остальные монеты с первой
@@ -347,19 +308,18 @@ export default function GiftCardForm() {
           tx.mergeCoins(coinToUse, [tx.object(coinId)]);
         }
       } else {
-        coinToUse = tx.object(normalizeAddress(coinObjectIds[0]));
+        coinToUse = tx.object(coinObjectIds[0]);
       }
 
       // Разделяем нужную сумму из монеты
-      const [splitCoin] = tx.splitCoins(coinToUse, [tx.pure.u64(amountInMinorUnits)]);
+      const [splitCoin] = tx.splitCoins(coinToUse, [tx.pure(amountInMinorUnits)]);
   
-      // Вызов Move функции с правильными типами параметров
       tx.moveCall({
         target: `${PACKAGE_ID}::gift_card::create_gift_card`,
         typeArguments: [coinType],
         arguments: [
-          tx.object(normalizeAddress(COLLECTION_OBJECT_ID)),
-          tx.pure.address(normalizedRecipient),
+          tx.object(COLLECTION_OBJECT_ID),
+          tx.pure.address(cleanRecipient),
           splitCoin,
           tx.pure.string(metadataUrl),
           tx.pure.string(message || ''),
@@ -367,12 +327,16 @@ export default function GiftCardForm() {
       });
   
       console.log('Executing transaction...');
-      
-      // Устанавливаем разумный газовый бюджет
-      const gasBudget = 100_000_000; // 0.1 SUI
-      tx.setGasBudget(gasBudget);
+      // Используем адаптивный газовый бюджет на основе доступного баланса
+      let gasBudget = Math.min(suiBalance - 10_000_000, 100_000_000); // Оставляем 0.01 SUI буфер, максимум 0.1 SUI
+      if (gasBudget < 20_000_000) {
+        gasBudget = 20_000_000; // Минимум 0.02 SUI
+      }
       
       console.log('Using gas budget:', gasBudget);
+      
+      // Устанавливаем газовый бюджет в самой транзакции
+      tx.setGasBudget(gasBudget);
       
       const result = await signAndExecuteTransaction(tx);
       console.log('Transaction result:', result);
@@ -431,48 +395,29 @@ export default function GiftCardForm() {
         return;
       }
 
-      // Проверим существование токена
-      toast.loading('Проверяем токен...', { id: 'redeem-gift-card' });
-      
-      const tokenCheck = await checkObjectExists(tokenId);
-      if (!tokenCheck.exists) {
-        toast.error(`Токен не найден: ${tokenCheck.error || 'неизвестная ошибка'}`, {
-          id: 'redeem-gift-card'
-        });
-        return;
-      }
-
       toast.loading('Погашение подарочной карты...', { id: 'redeem-gift-card' });
   
       const PACKAGE_ID = '0x99d953bfd9e91e1447548952dbd138f7fe0c442acec543ccad3d0da4c85771f5';
       
       const tx = new TransactionBlock();
-      
-      const normalizedSender = normalizeAddress(userAccount.address);
-      const normalizedTokenId = normalizeAddress(tokenId);
-      
-      tx.setSender(normalizedSender);
+      tx.setSender(userAccount.address);
   
       console.log('Transaction parameters:', {
         packageId: PACKAGE_ID,
-        sender: normalizedSender,
-        tokenId: normalizedTokenId
+        tokenId: tokenId
       });
   
       tx.moveCall({
         target: `${PACKAGE_ID}::gift_card::redeem_gift_card`,
         arguments: [
-          tx.object(normalizedTokenId),
+          tx.object(tokenId),
         ],
       });
   
       console.log('Executing transaction...');
-      
-      // Устанавливаем газовый бюджет
-      const gasBudget = 50_000_000; // 0.05 SUI
-      tx.setGasBudget(gasBudget);
-      
-      const result = await signAndExecuteTransaction(tx);
+      // Используем меньший газовый бюджет для редима
+      const gasBudget = Math.min(suiBalance - 5_000_000, 50_000_000); // Максимум 0.05 SUI
+      const result = await signAndExecuteTransaction(tx, { gasBudget });
       console.log('Transaction result:', result);
   
       toast.success('Подарочная карта погашена! Tx digest: ' + result.digest, {
