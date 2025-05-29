@@ -1,0 +1,6 @@
+[package]
+name = "gift_card"
+version = "0.1.0"
+
+[addresses]
+gift_card = "0x0"

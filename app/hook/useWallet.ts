@@ -61,11 +61,11 @@ export function useWallet() {
     try {
       const adapter = await getAdapter();
       
-      // Проверяем какие методы доступны в адаптере
+      // Check which methods are available in the adapter
       console.log('Adapter methods:', Object.getOwnPropertyNames(adapter));
       console.log('Adapter prototype methods:', Object.getOwnPropertyNames(Object.getPrototypeOf(adapter)));
       
-      // Пробуем разные варианты названий методов
+      // Try different method name variations
       if (typeof adapter.signAndExecuteTransaction === 'function') {
         const result = await adapter.signAndExecuteTransaction({
           transactionBlock,
@@ -82,7 +82,7 @@ export function useWallet() {
         });
         return result;
       } else {
-        // Если ни один метод не найден, выводим все доступные методы
+        // If no method is found, output all available methods
         const methods = Object.getOwnPropertyNames(adapter).filter(name => typeof adapter[name] === 'function');
         console.error('Available adapter methods:', methods);
         throw new Error(`signAndExecuteTransaction method not found. Available methods: ${methods.join(', ')}`);
